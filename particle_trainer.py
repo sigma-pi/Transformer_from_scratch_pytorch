@@ -1,245 +1,34 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.patches import Rectangle
-import seaborn as sns
+import numpy as np
+from particle_models import ParticleDataset, PhysicsInformedParticleTransformer
 
-class ParticleDataset(Dataset):
-    """Dataset for particle simulation trajectories"""
-    
-    def __init__(self, npz_file, sequence_length=10):
-        """
-        Args:
-            npz_file: Path to the .npz file containing simulation data
-            sequence_length: Number of consecutive frames to use for training
-        """
-        self.data = np.load(npz_file, allow_pickle=True)
-        self.sequence_length = sequence_length
-        
-        # Extract trajectories
-        self.trajectories = []
-        trajectory_idx = 0
-        
-        while f'simulation_trajectory_{trajectory_idx}' in self.data:
-            traj_data = self.data[f'simulation_trajectory_{trajectory_idx}']
-            positions = traj_data[0]  # Shape: (timesteps, particles, 2)
-            materials = traj_data[1]  # Shape: (particles,)
-            
-            # Compute velocities using discrete differentiation
-            velocities = np.zeros_like(positions)
-            velocities[1:] = positions[1:] - positions[:-1]  # v_t = pos_t - pos_{t-1}
-            velocities[0] = velocities[1]  # Copy first velocity
-            
-            # Combine positions and velocities: [pos_x, pos_y, vel_x, vel_y]
-            state = np.concatenate([positions, velocities], axis=-1)  # (timesteps, particles, 4)
-            
-            self.trajectories.append(state)
-            trajectory_idx += 1
-        
-        print(f"Loaded {len(self.trajectories)} trajectories")
-        if len(self.trajectories) > 0:
-            print(f"First trajectory shape: {self.trajectories[0].shape}")
-    
-    def __len__(self):
-        total_samples = 0
-        for traj in self.trajectories:
-            total_samples += max(0, traj.shape[0] - self.sequence_length)
-        return total_samples
-    
-    def __getitem__(self, idx):
-        # Find which trajectory and timestep this index corresponds to
-        current_idx = idx
-        for traj in self.trajectories:
-            max_start = max(0, traj.shape[0] - self.sequence_length)
-            if current_idx < max_start:
-                start_t = current_idx
-                sequence = traj[start_t:start_t + self.sequence_length]
-                
-                # Return input (first seq_len-1 frames) and target (last seq_len-1 frames)
-                x = torch.FloatTensor(sequence[:-1])  # (seq_len-1, particles, 4)
-                y = torch.FloatTensor(sequence[1:])   # (seq_len-1, particles, 4)
-                
-                return x, y
-            current_idx -= max_start
-        
-        raise IndexError("Dataset index out of range")
-    
-    def get_full_trajectory(self, traj_idx):
-        """Get a complete trajectory for rollout evaluation"""
-        if traj_idx >= len(self.trajectories):
-            raise IndexError(f"Trajectory index {traj_idx} out of range")
-        return torch.FloatTensor(self.trajectories[traj_idx])
-
-def add_boundary_features(x, bounds=(0.1, 0.9)):
-    """Add distance-to-boundary features"""
-    positions = x[:, :, :2]  # Extract positions (batch, particles, 2)
-    min_bound, max_bound = bounds
-    
-    # Distance to each boundary
-    dist_to_min = positions - min_bound  # Distance to left/bottom
-    dist_to_max = max_bound - positions  # Distance to right/top
-    
-    boundary_features = torch.cat([dist_to_min, dist_to_max], dim=-1)
-    return torch.cat([x, boundary_features], dim=-1)  # (batch, particles, 8)
-
-def apply_boundary_constraints(positions, velocities, bounds=(0.1, 0.9), damping=0.8):
-    """Apply soft boundary constraints with reflection and damping"""
-    min_bound, max_bound = bounds
-    
-    # Don't clamp positions immediately - let them slightly exceed bounds
-    margin = 0.01
-    
-    # Detect boundary collisions with margin
-    hit_min = positions < (min_bound + margin)
-    hit_max = positions > (max_bound - margin)
-    
-    # Only apply constraints when actually hitting boundaries
-    positions_constrained = positions.clone()
-    velocities_constrained = velocities.clone()
-    
-    # Reflect velocities at boundaries
-    velocities_constrained = torch.where(hit_min & (velocities < 0), 
-                                       -velocities * damping, velocities_constrained)
-    velocities_constrained = torch.where(hit_max & (velocities > 0), 
-                                       -velocities * damping, velocities_constrained)
-    
-    # Only clamp positions that are way outside bounds
-    positions_constrained = torch.clamp(positions_constrained, 
-                                      min_bound - margin, max_bound + margin)
-    
-    return positions_constrained, velocities_constrained
-
-class PhysicsInformedParticleTransformer(nn.Module):
-    """Transformer-based model for particle dynamics prediction"""
-    
-    def __init__(self, d_model=128, n_heads=8, n_layers=3, dropout=0.1, 
-                 bounds=(0.1, 0.9), dt=0.01):
-        super().__init__()
-        
-        # Model parameters
-        self.d_model = d_model
-        self.bounds = bounds
-        self.dt = dt
-        
-        # Input: [pos_x, pos_y, vel_x, vel_y, dist_to_min_x, dist_to_min_y, dist_to_max_x, dist_to_max_y]
-        self.input_dim = 8
-        
-        # Network layers
-        self.input_projection = nn.Linear(self.input_dim, d_model)
-        self.pos_embedding = nn.Parameter(torch.randn(1000, d_model))  # Max 1000 particles
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        
-        # Output projection to [delta_pos_x, delta_pos_y, delta_vel_x, delta_vel_y]
-        self.output_projection = nn.Linear(d_model, 4)
-        
-        # Layer normalization
-        self.layer_norm = nn.LayerNorm(d_model)
-        
-    def forward(self, x):
-        """
-        Args:
-            x: Input tensor of shape (batch_size, num_particles, 4)
-               Contains [pos_x, pos_y, vel_x, vel_y] for each particle
-
-        Returns:
-            Predicted next state of shape (batch_size, num_particles, 4)
-        """
-        batch_size, num_particles, _ = x.shape
-        
-        # Add boundary features
-        x_augmented = add_boundary_features(x, self.bounds)  # (batch, particles, 8)
-        
-        # Project to model dimension
-        embeddings = self.input_projection(x_augmented)  # (batch, particles, d_model)
-        
-        # Add positional embeddings (particle-specific, not spatial)
-        embeddings = embeddings + self.pos_embedding[:num_particles].unsqueeze(0)
-        embeddings = self.layer_norm(embeddings)
-        
-        # Apply transformer layers
-        transformed = self.transformer(embeddings)  # (batch, particles, d_model)
-        
-        # Project to output space
-        output = self.output_projection(transformed)  # (batch, particles, 4)
-        
-        # Split into positions and velocities
-        current_pos = x[:, :, :2]
-        current_vel = x[:, :, 2:]
-        
-        # Get position and velocity deltas from the model
-        delta_pos = output[:, :, :2]
-        delta_vel = output[:, :, 2:]
-        
-        # Apply deltas to current state
-        pred_pos = current_pos + delta_pos * self.dt
-        pred_vel = current_vel + delta_vel * self.dt
-        
-        # Apply soft boundary constraints
-        pred_pos, pred_vel = apply_boundary_constraints(pred_pos, pred_vel, self.bounds, damping=0.9)
-        
-        # Combine and return
-        return torch.cat([pred_pos, pred_vel], dim=-1)
-    
-    def multi_step_rollout(self, initial_state, num_steps, device='cpu'):
-        """
-        Perform multi-step rollout prediction
-        
-        Args:
-            initial_state: Initial particle state (1, num_particles, 4)
-            num_steps: Number of steps to predict
-            device: Device to run on
-
-        Returns:
-            rollout: Predicted trajectory (num_steps+1, num_particles, 4)
-        """
-        self.eval()
-        rollout = [initial_state.clone()]
-        current_state = initial_state.to(device)
-        
-        with torch.no_grad():
-            for step in range(num_steps):
-                next_state = self.forward(current_state)
-                rollout.append(next_state.cpu())
-                current_state = next_state
-        
-        return torch.cat(rollout, dim=0)  # (num_steps+1, num_particles, 4)
-
-def physics_informed_loss(pred, target, boundary_weight=0.01, bounds=(0.1, 0.9), dt=0.01):
+def physics_informed_loss(pred, target, gravity_weight=0.01, bounds=(0.1, 0.9), dt=0.01):
     """Combined loss function with physics constraints"""
     
     # Extract positions and velocities
     pred_pos, pred_vel = pred[:, :, :2], pred[:, :, 2:]
     true_pos, true_vel = target[:, :, :2], target[:, :, 2:]
     
-    # Standard MSE losses (increase weight on position)
-    pos_loss = F.mse_loss(pred_pos, true_pos) * 2.0  # Increased weight
+    # Standard MSE losses
+    pos_loss = F.mse_loss(pred_pos, true_pos)
     vel_loss = F.mse_loss(pred_vel, true_vel)
     
     # Softer boundary violation penalty
     min_bound, max_bound = bounds
-    margin = 0.02  # Increased margin
+    margin = 0.02
     
     # Only penalize significant violations
-    violation_min = torch.relu(min_bound - pred_pos)  # Only when actually outside
-    violation_max = torch.relu(pred_pos - max_bound)  # Only when actually outside
+    violation_min = torch.relu(min_bound - pred_pos)
+    violation_max = torch.relu(pred_pos - max_bound)
     boundary_loss = (violation_min + violation_max).mean()
     
     # Combine losses
-    total_loss = pos_loss + vel_loss + boundary_weight * boundary_loss
+    total_loss = pos_loss * 100 + vel_loss * 10 + boundary_loss * 0.01
     
     return {
         'total_loss': total_loss,
@@ -251,16 +40,6 @@ def physics_informed_loss(pred, target, boundary_weight=0.01, bounds=(0.1, 0.9),
 def evaluate_rollout_accuracy(model, dataset, num_rollouts=5, rollout_length=50, device='cpu'):
     """
     Evaluate model accuracy on multi-step rollouts
-    
-    Args:
-        model: Trained model
-        dataset: ParticleDataset instance
-        num_rollouts: Number of trajectories to evaluate
-        rollout_length: Length of rollout prediction
-        device: Device to run on
-
-    Returns:
-        metrics: Dictionary containing evaluation metrics
     """
     model.eval()
     model.to(device)
@@ -310,17 +89,13 @@ def evaluate_rollout_accuracy(model, dataset, num_rollouts=5, rollout_length=50,
     }
 
 def visualize_particle_trajectory(true_trajectory, pred_trajectory, bounds=(0.1, 0.9), 
-                                 save_path='particle_animation.gif', show_every=5):
+                                 save_path='particle_animation.gif', show_every=2):
     """
     Create an animated visualization of particle trajectories
-    
-    Args:
-        true_trajectory: Ground truth trajectory (timesteps, particles, 4)
-        pred_trajectory: Predicted trajectory (timesteps, particles, 4)
-        bounds: Simulation boundaries
-        save_path: Path to save animation
-        show_every: Show every N-th frame for performance
     """
+    # Set matplotlib backend for headless operation
+    plt.switch_backend('Agg')
+    
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
     # Extract positions
@@ -342,40 +117,57 @@ def visualize_particle_trajectory(true_trajectory, pred_trajectory, bounds=(0.1,
     scat1 = setup_axis(ax1, 'Ground Truth')
     scat2 = setup_axis(ax2, 'Model Prediction')
     
-    def animate(frame):
+    def animate(frame_idx):
+        frame = frames[frame_idx] if frame_idx < len(frames) else frames[-1]
         if frame >= len(true_pos):
-            return scat1, scat2
+            frame = len(true_pos) - 1
             
         # Update scatter plots
         scat1.set_offsets(true_pos[frame])
         scat2.set_offsets(pred_pos[frame])
         
         # Color particles by velocity magnitude for visual appeal
-        true_vel = true_trajectory[frame, :, 2:].numpy()
-        pred_vel = pred_trajectory[frame, :, 2:].numpy()
-        
-        true_speed = np.linalg.norm(true_vel, axis=1)
-        pred_speed = np.linalg.norm(pred_vel, axis=1)
-        
-        scat1.set_array(true_speed)
-        scat2.set_array(pred_speed)
+        if frame < len(true_trajectory):
+            true_vel = true_trajectory[frame, :, 2:].numpy()
+            pred_vel = pred_trajectory[frame, :, 2:].numpy()
+            
+            true_speed = np.linalg.norm(true_vel, axis=1)
+            pred_speed = np.linalg.norm(pred_vel, axis=1)
+            
+            scat1.set_array(true_speed)
+            scat2.set_array(pred_speed)
         
         return scat1, scat2
     
-    frames = list(range(0, len(true_pos), show_every))
-    anim = animation.FuncAnimation(fig, animate, frames=frames, 
-                                 interval=100, blit=False, repeat=True)
+    frames = list(range(0, min(len(true_pos), len(pred_pos)), show_every))
     
-    plt.tight_layout()
+    try:
+        anim = animation.FuncAnimation(fig, animate, frames=len(frames), 
+                                     interval=200, blit=False, repeat=True)
+        
+        plt.tight_layout()
+        
+        # Try different writers
+        try:
+            anim.save(save_path, writer='pillow', fps=5)
+            print(f"Animation saved to {save_path}")
+        except Exception as e:
+            print(f"Failed to save with pillow: {e}")
+            try:
+                anim.save(save_path, writer='imagemagick', fps=5)
+                print(f"Animation saved to {save_path} (using imagemagick)")
+            except Exception as e2:
+                print(f"Failed to save animation: {e2}")
+                print("Skipping animation creation")
+        
+    except Exception as e:
+        print(f"Error creating animation: {e}")
     
-    anim.save(save_path, writer='pillow', fps=10)
-    print(f"Animation saved to {save_path}")
     plt.close(fig)  # Close figure to free memory
-    
-    return anim
 
 def plot_rollout_errors(metrics, save_path='rollout_errors.png'):
     """Plot rollout error evolution over time"""
+    plt.switch_backend('Agg')
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
     timesteps = range(len(metrics['position_mse']))
@@ -409,6 +201,7 @@ def compare_trajectories_static(true_trajectory, pred_trajectory, timesteps_to_s
     """
     Create static comparison of trajectories at different timesteps
     """
+    plt.switch_backend('Agg')
     fig, axes = plt.subplots(2, len(timesteps_to_show), figsize=(4*len(timesteps_to_show), 8))
     
     true_pos = true_trajectory[:, :, :2].numpy()
@@ -417,7 +210,7 @@ def compare_trajectories_static(true_trajectory, pred_trajectory, timesteps_to_s
     min_bound, max_bound = bounds
     
     for i, t in enumerate(timesteps_to_show):
-        if t >= len(true_pos):
+        if t >= len(true_pos) or t >= len(pred_pos):
             continue
             
         # Ground truth
@@ -476,8 +269,16 @@ def custom_collate_fn(batch):
 def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, device='cuda'):
     """Training loop for the particle transformer"""
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    # Separate optimizers for different parts
+    main_params = [p for name, p in model.named_parameters() if 'gravity' not in name]
+    gravity_params = [p for name, p in model.named_parameters() if 'gravity' in name]
+    
+    optimizer = torch.optim.Adam([
+        {'params': main_params, 'lr': lr},
+        {'params': gravity_params, 'lr': lr * 0.1}  # Slower learning for gravity
+    ], weight_decay=1e-5)
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5)
     
     model.to(device)
     
@@ -548,15 +349,18 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, device
         
         scheduler.step(avg_val_loss)
         
-        if epoch % 10 == 0:
-            print(f'Epoch {epoch:3d}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}')
+        if epoch % 5 == 0:
+            print(f'Epoch {epoch:3d}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}, Gravity = [{model.gravity[0].item():.4f}, {model.gravity[1].item():.4f}]')
     
     return train_losses, val_losses
 
-# Example usage and testing
+# Main training and evaluation script
 if __name__ == "__main__":
+    # Set matplotlib backend for headless operation
+    plt.switch_backend('Agg')
+    
     # Load dataset
-    dataset = ParticleDataset('sample_data/water_drop/combined_dataset.npz', sequence_length=5)
+    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=20)
     
     # Split into train/val
     train_size = int(0.8 * len(dataset))
@@ -567,12 +371,13 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=custom_collate_fn)
     
-    # Initialize model (no gravity parameter)
+    # Initialize model with small gravity
     model = PhysicsInformedParticleTransformer(
         d_model=128,
         n_heads=8,
         n_layers=3,
         dropout=0.1,
+        gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
         dt=0.01
     )
@@ -585,7 +390,7 @@ if __name__ == "__main__":
     
     train_losses, val_losses = train_model(
         model, train_loader, val_loader, 
-        num_epochs=50, lr=1e-3, device=device
+        num_epochs=30, lr=1e-3, device=device
     )
     
     # Plot training curves and save
@@ -624,15 +429,35 @@ if __name__ == "__main__":
     sample_traj = dataset.get_full_trajectory(0)
     initial_state = sample_traj[0:1]
     
-    # Generate prediction
-    pred_traj = model.multi_step_rollout(initial_state, min(50, len(sample_traj)-1), device)
-    true_traj = sample_traj[:len(pred_traj)]
+    # Generate prediction for visualization (shorter rollout for animation)
+    pred_traj = model.multi_step_rollout(initial_state, 100, device=device)
+    true_traj = sample_traj[:101]  # Match length
     
     # Create static comparison
-    compare_trajectories_static(true_traj, pred_traj, save_path='trajectory_comparison.png')
+    compare_trajectories_static(true_traj, pred_traj, 
+                              timesteps_to_show=[0, 20, 50, 100],
+                              save_path='trajectory_comparison.png')
     
-    # Create animation
-    print("Creating animation...")
-    visualize_particle_trajectory(true_traj, pred_traj, save_path='particle_animation.gif')
+    # Create animated visualization (if possible)
+    try:
+        visualize_particle_trajectory(true_traj, pred_traj, 
+                                    save_path='particle_animation.gif',
+                                    show_every=3)
+    except Exception as e:
+        print(f"Animation creation failed: {e}")
+        print("Static comparison created instead")
     
-    print("\nEvaluation complete! Check the generated plots and animation.")
+    print("\n=== Summary ===")
+    print(f"Training completed with final validation loss: {val_losses[-1]:.6f}")
+    print(f"Model saved as 'particle_transformer.pth'")
+    print(f"Learned gravity: [{model.gravity[0].item():.4f}, {model.gravity[1].item():.4f}]")
+    print("Visualizations saved:")
+    print("  - training_curves.png")
+    print("  - rollout_errors.png") 
+    print("  - trajectory_comparison.png")
+    print("  - particle_animation.gif (if successful)")
+    
+    print("\nTo use the trained model:")
+    print("from particle_models import PhysicsInformedParticleTransformer")
+    print("model = PhysicsInformedParticleTransformer()")
+    print("model.load_state_dict(torch.load('particle_transformer.pth'))")

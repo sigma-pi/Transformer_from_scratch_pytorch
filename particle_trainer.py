@@ -360,7 +360,7 @@ if __name__ == "__main__":
     plt.switch_backend('Agg')
     
     # Load dataset
-    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=20)
+    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=30)
     
     # Split into train/val
     train_size = int(0.8 * len(dataset))
@@ -376,7 +376,7 @@ if __name__ == "__main__":
         d_model=128,
         n_heads=8,
         n_layers=3,
-        dropout=0.1,
+        dropout=0.01,
         gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
         dt=0.01
@@ -390,7 +390,7 @@ if __name__ == "__main__":
     
     train_losses, val_losses = train_model(
         model, train_loader, val_loader, 
-        num_epochs=30, lr=1e-3, device=device
+        num_epochs=60, lr=1e-3, device=device
     )
     
     # Plot training curves and save

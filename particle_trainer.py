@@ -360,7 +360,7 @@ if __name__ == "__main__":
     plt.switch_backend('Agg')
     
     # Load dataset
-    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=20)
+    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=25)
     
     # Split into train/val
     train_size = int(0.8 * len(dataset))

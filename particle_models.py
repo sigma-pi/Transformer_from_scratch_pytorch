@@ -179,7 +179,8 @@ class PhysicsInformedParticleTransformer(nn.Module):
         pred_vel = output[:, :, 2:]
         
         # Apply physics: add gravity to velocity predictions
-        gravity_effect = self.gravity.unsqueeze(0).unsqueeze(0) * self.dt
+        gravity_y = torch.tensor([0.0, self.gravity[1].item()]).to(x.device)
+        gravity_effect = gravity_y.unsqueeze(0).unsqueeze(0) * self.dt
         pred_vel = pred_vel + gravity_effect
         
         # Apply soft boundary constraints

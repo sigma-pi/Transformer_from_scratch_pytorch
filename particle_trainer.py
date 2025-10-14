@@ -71,7 +71,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, device
         {'params': gravity_params, 'lr': lr * 0.1}  # Slower learning for gravity
     ], weight_decay=1e-5)
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5)
     
     model.to(device)
     
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     
     # Load dataset
     print("Loading dataset...")
-    dataset = ParticleDataset('sample_data/water_drop/combined_dataset.npz', sequence_length=15)
+    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=15)
     
     # Split into train/val
     train_size = int(0.8 * len(dataset))
@@ -192,7 +192,7 @@ if __name__ == "__main__":
         d_model=128,
         n_heads=8,
         n_layers=3,
-        dropout=0.1,
+        dropout=0.01,
         gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
         dt=0.01

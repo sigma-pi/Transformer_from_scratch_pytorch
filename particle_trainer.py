@@ -192,7 +192,7 @@ if __name__ == "__main__":
         d_model=128,
         n_heads=8,
         n_layers=3,
-        dropout=0.01,
+        dropout=0.1,
         gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
         dt=0.01

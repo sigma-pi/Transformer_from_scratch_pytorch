@@ -94,14 +94,14 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, device
             total_loss = 0
             
             # Process each timestep in the sequence
-            for t in range(seq_len):
+            for t in range(seq_len-1):
                 pred = model(batch_x[:, t])  # (batch, particles, 4)
-                target = batch_y[:, t]       # (batch, particles, 4)
+                target = batch_y[:, t+1]       # (batch, particles, 4)
                 
                 loss_dict = physics_informed_loss(pred, target)
                 total_loss += loss_dict['total_loss']
-            
-            total_loss = total_loss / seq_len
+
+            total_loss = total_loss / (seq_len-1)
             total_loss.backward()
             
             # Gradient clipping

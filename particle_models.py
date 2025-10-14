@@ -182,6 +182,7 @@ class PhysicsInformedParticleTransformer(nn.Module):
         gravity_y = torch.tensor([0.0, self.gravity[1].item()]).to(x.device)
         gravity_effect = gravity_y.unsqueeze(0).unsqueeze(0) * self.dt
         pred_vel = pred_vel + gravity_effect
+        pred_pos = pred_pos + pred_vel * self.dt
         
         # Apply soft boundary constraints
         pred_pos, pred_vel = apply_boundary_constraints(pred_pos, pred_vel, self.bounds, damping=0.9)

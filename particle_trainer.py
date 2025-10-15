@@ -143,7 +143,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3, device
         scheduler.step(avg_val_loss)
         
         if epoch % 5 == 0:
-            print(f'Epoch {epoch:3d}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}, Gravity = [{model.gravity[0].item():.4f}, {model.gravity[1].item():.4f}]')
+            print(f'Epoch {epoch:3d}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}, Gravity = [0.0, {model.gravity.item():.4f}]')
     
     return train_losses, val_losses
 
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         dropout=0.01,
         gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
-        dt=0.01
+        dt=0.05
     )
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -221,7 +221,7 @@ if __name__ == "__main__":
     training_info = {
         'train_losses': train_losses,
         'val_losses': val_losses,
-        'final_gravity': [model.gravity[0].item(), model.gravity[1].item()],
+        'final_gravity': [0.0, model.gravity.item()],
         'model_config': {
             'd_model': 128,
             'n_heads': 8,
@@ -237,5 +237,5 @@ if __name__ == "__main__":
     print("\n=== Training Complete ===")
     print(f"Final training loss: {train_losses[-1]:.6f}")
     print(f"Final validation loss: {val_losses[-1]:.6f}")
-    print(f"Learned gravity: [{model.gravity[0].item():.4f}, {model.gravity[1].item():.4f}]")
+    print(f"Learned gravity: [0.0, {model.gravity.item():.4f}]")
     print("\nTo evaluate the model, run: python particle_evaluator.py")

@@ -116,7 +116,9 @@ class PhysicsInformedParticleTransformer(nn.Module):
         self.input_dim = 8
         
         # Small learnable gravity (can be fine-tuned during training)
-        self.gravity = nn.Parameter(torch.tensor([0.0, gravity]))
+        self.gravity = nn.Parameter(torch.tensor(gravity))
+        # Register zero as a buffer so it moves with the model to different devices
+        self.register_buffer('zero', torch.tensor(0.0))
         
         # Network layers
         self.input_projection = nn.Linear(self.input_dim, d_model)
@@ -179,7 +181,7 @@ class PhysicsInformedParticleTransformer(nn.Module):
         pred_vel = output[:, :, 2:]
         
         # Apply physics: add gravity to velocity predictions
-        gravity_y = torch.tensor([0.0, self.gravity[1].item()]).to(x.device)
+        gravity_y = torch.stack([self.zero, self.gravity])
         gravity_effect = gravity_y.unsqueeze(0).unsqueeze(0) * self.dt
         pred_vel = pred_vel + gravity_effect
         pred_pos = pred_pos + pred_vel * self.dt

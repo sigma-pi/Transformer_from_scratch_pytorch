@@ -139,7 +139,7 @@ class PhysicsInformedParticleTransformer(nn.Module):
         self.output_projection = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
-            nn.Linear(d_model // 2, 4)
+            nn.Linear(d_model // 2, 2)
         )
         
         # Layer normalization
@@ -177,15 +177,14 @@ class PhysicsInformedParticleTransformer(nn.Module):
         current_vel = x[:, :, 2:]
         
         # Split into positions and velocities
-        pred_pos = output[:, :, :2]
-        pred_vel = output[:, :, 2:]
+        pred_acc = output
         
         # Apply physics: add gravity to velocity predictions
         gravity_y = torch.stack([self.zero, self.gravity])
         gravity_effect = gravity_y.unsqueeze(0).unsqueeze(0) * self.dt
-        pred_vel = pred_vel + gravity_effect
-        pred_pos = pred_pos + pred_vel * self.dt
-        
+        pred_vel = current_vel + pred_acc * self.dt + gravity_effect
+        pred_pos = current_pos + pred_vel * self.dt
+
         # Apply soft boundary constraints
         pred_pos, pred_vel = apply_boundary_constraints(pred_pos, pred_vel, self.bounds, damping=0.9)
         

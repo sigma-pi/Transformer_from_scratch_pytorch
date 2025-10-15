@@ -25,7 +25,7 @@ def physics_informed_loss(pred, target, gravity_weight=0.01, bounds=(0.1, 0.9), 
     boundary_loss = (violation_min + violation_max).mean()
     
     # Combine losses
-    total_loss = pos_loss * 100 + vel_loss * 10 + boundary_loss * 0.01
+    total_loss = pos_loss * 100 + vel_loss * 1 + boundary_loss * 0.01
     
     return {
         'total_loss': total_loss,
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         dropout=0.01,
         gravity=0.005,  # Small gravity
         bounds=(0.1, 0.9),
-        dt=0.05
+        dt=0.01
     )
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")

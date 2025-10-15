@@ -326,7 +326,7 @@ if __name__ == "__main__":
     
     # Load dataset
     print("\nLoading dataset...")
-    dataset = ParticleDataset('sample_data/water_drop/combined_dataset.npz', sequence_length=15)
+    dataset = ParticleDataset('sample_data/water_drop/single_trajectory.npz', sequence_length=15)
     
     # Set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
